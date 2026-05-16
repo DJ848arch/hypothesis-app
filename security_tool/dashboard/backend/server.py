@@ -363,6 +363,194 @@ async def get_feedback_stats():
     return get_stats()
 
 
+# ── Team & Quiz management ────────────────────────────────────
+
+@app.get("/api/team")
+async def get_team():
+    from quiz_manager import list_members
+    return list_members()
+
+
+@app.post("/api/team/member")
+async def upsert_member(body: dict):
+    from quiz_manager import upsert_member
+    return upsert_member(
+        name=body["name"],
+        email=body.get("email", ""),
+        role=body.get("role", "Security Analyst"),
+    )
+
+
+@app.get("/api/team/dashboard")
+async def team_dashboard():
+    from quiz_manager import get_team_dashboard
+    return get_team_dashboard()
+
+
+def _generate_quiz_questions(attack_types: list[str], api_key: str) -> list[dict]:
+    """Use Claude to generate quiz questions for the given attack types."""
+    import re, json as _json
+    from attack_catalog import get_attack
+    import anthropic as _ant
+
+    attack_summaries = []
+    for atype in attack_types:
+        meta = get_attack(atype)
+        if meta:
+            attack_summaries.append(
+                f"- {meta['name']} (OWASP: {meta['owasp']}, CWE: {meta['cwe']}): "
+                f"{meta.get('description', '')} "
+                f"Variants: {', '.join(meta.get('variants', [])[:3])}"
+            )
+
+    if not attack_summaries:
+        return []
+
+    prompt = (
+        f"Generate 3 multiple-choice quiz questions per attack type for a security team quiz.\n\n"
+        f"Attack types:\n" + "\n".join(attack_summaries) + "\n\n"
+        "Rules:\n"
+        "- Each question must have 4 options (A/B/C/D) with exactly one correct answer\n"
+        "- Test practical understanding: detection, defense, and exploitation patterns\n"
+        "- Include a clear explanation for the correct answer\n"
+        "- Make distractors plausible but clearly wrong to a trained analyst\n\n"
+        "Respond ONLY with a JSON array of question objects:\n"
+        '[{"id": 1, "attack_type": "<key>", "question": "...", '
+        '"options": {"A": "...", "B": "...", "C": "...", "D": "..."}, '
+        '"correct": "A", "explanation": "..."}, ...]'
+    )
+
+    try:
+        client = _ant.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=4096,
+            thinking={"type": "adaptive"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = message.content[-1].text if message.content else ""
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if match:
+            questions = _json.loads(match.group())
+            # Assign UUIDs for IDs
+            for i, q in enumerate(questions):
+                q["id"] = str(uuid.uuid4())
+            return questions
+    except Exception:
+        pass
+    return []
+
+
+@app.post("/api/quiz/schedule")
+async def schedule_quiz(body: dict, background_tasks: BackgroundTasks):
+    from quiz_manager import schedule_quiz
+    from attack_catalog import get_attack
+
+    member_ids = body.get("member_ids", [])
+    attack_types = body.get("attack_types", [])
+    questions = body.get("questions", [])
+    api_key = body.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if not questions:
+        if api_key:
+            # Generate AI questions synchronously (runs fast enough for this use case)
+            questions = await asyncio.get_event_loop().run_in_executor(
+                None, _generate_quiz_questions, attack_types, api_key
+            )
+
+        # Fallback: static questions from catalog if AI generation failed
+        if not questions:
+            for atype in attack_types:
+                meta = get_attack(atype)
+                if meta:
+                    objs = meta.get("learning_objectives", [])
+                    for i, obj in enumerate(objs[:3]):
+                        questions.append({
+                            "id": str(uuid.uuid4()),
+                            "attack_type": atype,
+                            "question": f"Regarding {meta['name']}: {obj}. Which action best addresses this?",
+                            "options": {
+                                "A": obj,
+                                "B": "Disable all input validation to improve performance",
+                                "C": "Store all credentials in source code for convenience",
+                                "D": "Grant all users administrative privileges by default",
+                            },
+                            "correct": "A",
+                            "explanation": f"For {meta['name']}: {obj}",
+                        })
+
+    assignment = schedule_quiz(
+        member_ids=member_ids,
+        questions=questions,
+        attack_types=attack_types,
+        title=body.get("title", "Security Knowledge Check"),
+        scheduled_by=body.get("scheduled_by", "manager"),
+    )
+    return assignment
+
+
+@app.get("/api/quiz/pending/{member_id}")
+async def get_pending_quizzes(member_id: str):
+    from quiz_manager import get_pending_quizzes
+    return get_pending_quizzes(member_id)
+
+
+@app.post("/api/quiz/submit")
+async def submit_quiz(body: dict):
+    from quiz_manager import submit_quiz_result
+    api_key = body.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    return submit_quiz_result(
+        assignment_id=body["assignment_id"],
+        member_id=body["member_id"],
+        answers=body.get("answers", {}),
+        api_key=api_key,
+    )
+
+
+@app.get("/api/quiz/results/{member_id}")
+async def get_results(member_id: str):
+    from quiz_manager import get_quiz_results
+    return get_quiz_results(member_id)
+
+
+@app.get("/api/training/{member_id}")
+async def get_training(member_id: str):
+    from quiz_manager import get_training_schedule
+    return get_training_schedule(member_id)
+
+
+@app.get("/api/training")
+async def get_all_training():
+    from quiz_manager import get_all_training
+    return get_all_training()
+
+
+@app.patch("/api/training/{training_id}/complete")
+async def complete_training(training_id: str):
+    from quiz_manager import _load, _save
+    state = _load()
+    for member_training in state["training_schedule"].values():
+        for item in member_training:
+            if item.get("training_id") == training_id:
+                item["status"] = "completed"
+                item["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _save(state)
+    return {"training_id": training_id, "status": "completed"}
+
+
+@app.get("/api/notifications/{member_id}")
+async def get_notifications(member_id: str, unseen_only: bool = False):
+    from quiz_manager import get_notifications
+    return get_notifications(member_id, unseen_only)
+
+
+@app.post("/api/notifications/{member_id}/seen")
+async def mark_seen(member_id: str):
+    from quiz_manager import mark_notifications_seen
+    mark_notifications_seen(member_id)
+    return {"status": "ok"}
+
+
 @app.get("/api/attack-catalog")
 async def get_attack_catalog():
     from attack_catalog import list_attacks

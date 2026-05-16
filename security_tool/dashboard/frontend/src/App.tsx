@@ -7,6 +7,9 @@ import FindingsTable from './components/FindingsTable'
 import SeverityChart from './components/SeverityChart'
 import SeverityBadge from './components/SeverityBadge'
 import RemediationPanel from './components/RemediationPanel'
+import QuizPopup from './components/manager/QuizPopup'
+import ManagerConsole from './components/manager/ManagerConsole'
+import TrainingSchedule from './components/manager/TrainingSchedule'
 
 // ──────────────────────────────────────────────────────────────
 // Layout
@@ -25,6 +28,8 @@ function Nav() {
         <div className="flex-1" />
         <Link to="/" className="text-sm text-muted hover:text-white transition-colors">New Scan</Link>
         <Link to="/history" className="text-sm text-muted hover:text-white transition-colors">History</Link>
+        <Link to="/manager" className="text-sm text-muted hover:text-white transition-colors">Manager</Link>
+        <Link to="/training" className="text-sm text-muted hover:text-white transition-colors">Training</Link>
       </div>
     </nav>
   )
@@ -279,14 +284,94 @@ function HistoryPage() {
 // Root
 // ──────────────────────────────────────────────────────────────
 
+// ──────────────────────────────────────────────────────────────
+// Root — quiz pop-up is shown globally whenever pending quizzes exist
+// ──────────────────────────────────────────────────────────────
+
+const MEMBER_ID_KEY = 'bass_member_id'
+
 export default function App() {
+  const [memberId, setMemberId] = useState<string>(() => {
+    return localStorage.getItem(MEMBER_ID_KEY) || ''
+  })
+  const [showMemberPrompt, setShowMemberPrompt] = useState(!localStorage.getItem(MEMBER_ID_KEY))
+  const [memberInput, setMemberInput] = useState('')
+  const [showQuiz, setShowQuiz] = useState(false)
+
+  // After member ID is set, check for pending quizzes every 60s
+  useEffect(() => {
+    if (!memberId) return
+    let alive = true
+
+    async function check() {
+      try {
+        const r = await fetch(`/api/quiz/pending/${memberId}`)
+        const data = await r.json()
+        if (alive && Array.isArray(data) && data.length > 0) setShowQuiz(true)
+      } catch {
+        // ignore network errors
+      }
+    }
+
+    check()
+    const timer = setInterval(check, 60_000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [memberId])
+
+  function saveMember() {
+    const id = memberInput.trim().toLowerCase().replace(/\s+/g, '_').replace(/-/g, '_')
+    if (!id) return
+    localStorage.setItem(MEMBER_ID_KEY, id)
+    setMemberId(id)
+    setShowMemberPrompt(false)
+  }
+
   return (
     <div className="min-h-screen">
       <Nav />
+
+      {/* One-time member ID prompt */}
+      {showMemberPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-surface border border-border rounded-2xl w-full max-w-sm shadow-2xl p-6 space-y-4">
+            <div className="text-center">
+              <div className="text-3xl mb-2">⚔</div>
+              <h2 className="font-black text-lg">Welcome to BASS</h2>
+              <p className="text-sm text-muted mt-1">Enter your name to identify yourself for quizzes and training.</p>
+            </div>
+            <input
+              value={memberInput}
+              onChange={(e) => setMemberInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && saveMember()}
+              placeholder="Your name (e.g. Jane Smith)"
+              className="w-full px-3 py-2 bg-surface2 border border-border rounded-lg text-sm focus:outline-none focus:border-white/40"
+              autoFocus
+            />
+            <button
+              onClick={saveMember}
+              disabled={!memberInput.trim()}
+              className="w-full py-2.5 rounded-lg font-bold text-sm bg-[#ffc53d] text-[#0d1117] hover:bg-[#ffa940] transition-colors disabled:opacity-50"
+            >
+              Continue
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Quiz pop-up — non-dismissible */}
+      {showQuiz && memberId && (
+        <QuizPopup
+          memberId={memberId}
+          onComplete={() => setShowQuiz(false)}
+        />
+      )}
+
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/scan/:scanId" element={<ScanPage />} />
         <Route path="/history" element={<HistoryPage />} />
+        <Route path="/manager" element={<ManagerConsole />} />
+        <Route path="/training" element={<TrainingSchedule />} />
       </Routes>
     </div>
   )
