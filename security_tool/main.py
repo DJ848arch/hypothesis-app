@@ -169,6 +169,35 @@ examples:
         "--key", default=None, metavar="API_KEY",
         help="Anthropic API key (overrides ANTHROPIC_API_KEY env var)",
     )
+    # ── Watch mode ──────────────────────────────────────────────
+    parser.add_argument(
+        "--watch", action="store_true",
+        help="Watch mode: continuously monitor the target for changes and rescan on every save",
+    )
+    # ── Threat intelligence ─────────────────────────────────────
+    parser.add_argument(
+        "--threat-intel", action="store_true",
+        help="Enrich findings with CVE/NVD data, EPSS exploit probability, and CISA KEV status",
+    )
+    # ── Compliance report ───────────────────────────────────────
+    parser.add_argument(
+        "--compliance", nargs="*", metavar="FRAMEWORK",
+        help="Generate a compliance gap report. Optionally specify frameworks: soc2 pci_dss nist_800_53 owasp_asvs. "
+             "Omit to include all. Requires --output or saves to bass-compliance.html",
+    )
+    # ── Alerting ────────────────────────────────────────────────
+    parser.add_argument(
+        "--slack-webhook", default=None, metavar="URL",
+        help="Slack incoming webhook URL for alert notifications (overrides BASS_SLACK_WEBHOOK)",
+    )
+    parser.add_argument(
+        "--teams-webhook", default=None, metavar="URL",
+        help="Teams incoming webhook URL for alert notifications (overrides BASS_TEAMS_WEBHOOK)",
+    )
+    parser.add_argument(
+        "--alert-on", default=None, metavar="SEVERITY",
+        help="Minimum severity for alert notifications (default: same as --notify-on)",
+    )
     return parser.parse_args()
 
 
@@ -250,10 +279,38 @@ def main() -> None:
     print()
 
     from coordinator import SecurityCoordinator
+    from alerting import AlertManager
+
+    # Configure alert manager
+    alert_on = args.alert_on or args.notify_on
+    alert_manager = AlertManager(min_severity=alert_on)
+    if getattr(args, "slack_webhook", None):
+        os.environ["BASS_SLACK_WEBHOOK"] = args.slack_webhook
+        alert_manager = AlertManager(min_severity=alert_on)
+    if getattr(args, "teams_webhook", None):
+        os.environ["BASS_TEAMS_WEBHOOK"] = args.teams_webhook
+        alert_manager = AlertManager(min_severity=alert_on)
+
+    if alert_manager.is_configured():
+        channels = [type(c).__name__ for c in alert_manager._channels]
+        print(f"{BOLD}{CYAN}Alerts:{RESET_COLOR}    {', '.join(channels)} (≥ {alert_on})")
 
     remediate = args.remediate and not args.notify_only and interactive
     if args.remediate and args.notify_only:
         print(f"{YELLOW}[BASS] --notify-only overrides --remediate. Running in notify-only mode.{RESET_COLOR}\n")
+
+    # ── Watch mode ─────────────────────────────────────────────
+    if getattr(args, "watch", False):
+        from watcher import run_watch_mode
+        run_watch_mode(
+            target_dir=target_dir,
+            api_key=api_key,
+            mode=args.mode,
+            notify_on=args.notify_on,
+            interactive=interactive,
+            alert_manager=alert_manager if alert_manager.is_configured() else None,
+        )
+        return
 
     coordinator = SecurityCoordinator(api_key=api_key)
     results = coordinator.run(
@@ -263,6 +320,53 @@ def main() -> None:
         interactive=interactive,
         remediate=remediate,
     )
+
+    # ── Threat intelligence enrichment ─────────────────────────
+    if getattr(args, "threat_intel", False):
+        from threat_intel import enrich_findings, get_threat_summary
+        print(f"\n{BOLD}{CYAN}[THREAT INTEL]{RESET_COLOR} Enriching findings with CVE/NVD data…")
+        findings = results.get("all_findings", [])
+        if findings:
+            results["all_findings"] = enrich_findings(findings)
+            ti_summary = get_threat_summary(results["all_findings"])
+            results["threat_intel_summary"] = ti_summary
+            print(f"  CVEs found:       {ti_summary['total_cves_found']}")
+            print(f"  Active exploits:  {ti_summary['findings_with_active_exploits']} finding(s) with known exploits")
+            if ti_summary["cisa_kev_cves"]:
+                print(f"  {RED}{BOLD}CISA KEV:{RESET_COLOR}         {', '.join(ti_summary['cisa_kev_cves'])}")
+            print(f"  Max EPSS score:   {ti_summary['max_epss_score']} ({ti_summary['max_epss_label']})")
+        else:
+            print(f"  No findings to enrich.")
+        print()
+
+    # ── Compliance report ───────────────────────────────────────
+    if getattr(args, "compliance", None) is not None:
+        from compliance import generate_compliance_report, FRAMEWORK_KEYS
+        fw_keys = args.compliance or FRAMEWORK_KEYS
+        invalid = [k for k in fw_keys if k not in FRAMEWORK_KEYS]
+        if invalid:
+            print(f"{YELLOW}[COMPLIANCE] Unknown framework(s): {', '.join(invalid)}. "
+                  f"Valid: {', '.join(FRAMEWORK_KEYS)}{RESET_COLOR}")
+            fw_keys = [k for k in fw_keys if k in FRAMEWORK_KEYS]
+        if fw_keys:
+            print(f"{BOLD}{CYAN}[COMPLIANCE]{RESET_COLOR} Mapping findings to: {', '.join(fw_keys)}…")
+            comp_html = generate_compliance_report(
+                findings=results.get("all_findings", []),
+                target=str(target_dir),
+                scan_id=results.get("scan_id", ""),
+                framework_keys=fw_keys,
+            )
+            comp_path = args.output if args.output and args.output_format not in ("html", "json") else "bass-compliance.html"
+            Path(comp_path).write_text(comp_html, encoding="utf-8")
+            print(f"{GREEN}Compliance report saved to: {comp_path}{RESET_COLOR}")
+        print()
+
+    # ── Alerting ────────────────────────────────────────────────
+    if alert_manager.is_configured():
+        outcomes = alert_manager.send_scan_results(results)
+        for channel, ok in outcomes.items():
+            status = f"{GREEN}✔{RESET_COLOR}" if ok else f"{RED}✖{RESET_COLOR}"
+            print(f"  {status} Alert → {channel}")
 
     # Attack simulations
     if args.simulate:

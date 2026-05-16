@@ -557,6 +557,56 @@ async def get_attack_catalog():
     return list_attacks()
 
 
+@app.get("/api/scan/{scan_id}/compliance")
+async def get_compliance_report(scan_id: str, frameworks: str = ""):
+    """Map a completed scan's findings to compliance frameworks. Returns JSON mapping."""
+    scan = _scans.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+    results = scan.get("results")
+    if not results:
+        raise HTTPException(400, "Scan not complete")
+    from compliance import map_findings_to_frameworks, FRAMEWORK_KEYS
+    fw_keys = [k.strip() for k in frameworks.split(",") if k.strip()] if frameworks else FRAMEWORK_KEYS
+    return map_findings_to_frameworks(results.get("all_findings", []), fw_keys)
+
+
+@app.get("/api/scan/{scan_id}/compliance/report")
+async def get_compliance_html_report(scan_id: str):
+    """Generate and return an HTML compliance gap report for a scan."""
+    scan = _scans.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+    results = scan.get("results")
+    if not results:
+        raise HTTPException(400, "Scan not complete")
+    from compliance import generate_compliance_report
+    html = generate_compliance_report(
+        findings=results.get("all_findings", []),
+        target=results.get("target", "?"),
+        scan_id=scan_id,
+    )
+    return HTMLResponse(content=html)
+
+
+@app.post("/api/scan/{scan_id}/threat-intel")
+async def enrich_with_threat_intel(scan_id: str):
+    """Enrich a scan's findings with CVE/NVD/EPSS/CISA KEV data."""
+    scan = _scans.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+    results = scan.get("results")
+    if not results:
+        raise HTTPException(400, "Scan not complete")
+
+    from threat_intel import enrich_findings, get_threat_summary
+    findings = results.get("all_findings", [])
+    enriched = await asyncio.get_event_loop().run_in_executor(None, enrich_findings, findings)
+    results["all_findings"] = enriched
+    results["threat_intel_summary"] = get_threat_summary(enriched)
+    return results["threat_intel_summary"]
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "scans": len(_scans)}

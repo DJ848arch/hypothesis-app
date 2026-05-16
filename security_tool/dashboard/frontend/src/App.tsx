@@ -67,8 +67,12 @@ function ScanPage() {
   const { scanId } = useParams<{ scanId: string }>()
   const [results, setResults] = useState<ScanResults | null>(null)
   const [error, setError] = useState('')
-  const [activeTab, setActiveTab] = useState<'findings' | 'remediations' | 'integrations'>('findings')
+  const [activeTab, setActiveTab] = useState<'findings' | 'remediations' | 'integrations' | 'compliance' | 'threat'>('findings')
   const [remediations, setRemediations] = useState<any[]>([])
+  const [complianceData, setComplianceData] = useState<any>(null)
+  const [loadingCompliance, setLoadingCompliance] = useState(false)
+  const [threatIntel, setThreatIntel] = useState<any>(null)
+  const [loadingThreat, setLoadingThreat] = useState(false)
 
   const fetchRemediations = useCallback(async () => {
     if (!scanId) return
@@ -182,16 +186,27 @@ function ScanPage() {
 
           {/* Tabs */}
           <div className="bg-surface border border-border rounded-2xl overflow-hidden">
-            <div className="flex border-b border-border">
+            <div className="flex border-b border-border overflow-x-auto">
               {[
                 { id: 'findings', label: `Findings (${results.total_findings})` },
                 { id: 'remediations', label: `AI Fix Proposals (${remediations.length})` },
                 { id: 'integrations', label: `Integrations (${results.integrations?.total ?? 0})` },
+                { id: 'compliance', label: '📋 Compliance' },
+                { id: 'threat', label: '🌐 Threat Intel' },
               ].map((tab) => (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id as typeof activeTab)}
-                  className={`px-5 py-3 text-sm font-semibold border-b-2 transition-colors ${
+                  onClick={() => {
+                    setActiveTab(tab.id as typeof activeTab)
+                    if (tab.id === 'compliance' && !complianceData && !loadingCompliance) {
+                      setLoadingCompliance(true)
+                      fetch(`/api/scan/${scanId}/compliance`)
+                        .then((r) => r.json())
+                        .then((d) => setComplianceData(d))
+                        .finally(() => setLoadingCompliance(false))
+                    }
+                  }}
+                  className={`px-5 py-3 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap ${
                     activeTab === tab.id
                       ? 'border-white text-white'
                       : 'border-transparent text-muted hover:text-white'
@@ -218,9 +233,257 @@ function ScanPage() {
                   <FindingsTable findings={results.integrations?.findings ?? []} />
                 </div>
               )}
+              {activeTab === 'compliance' && (
+                <CompliancePanel
+                  data={complianceData}
+                  loading={loadingCompliance}
+                  scanId={scanId!}
+                />
+              )}
+              {activeTab === 'threat' && (
+                <ThreatIntelPanel
+                  scanId={scanId!}
+                  findings={results.all_findings}
+                  data={threatIntel}
+                  loading={loadingThreat}
+                  onEnrich={() => {
+                    setLoadingThreat(true)
+                    fetch(`/api/scan/${scanId}/threat-intel`, { method: 'POST' })
+                      .then((r) => r.json())
+                      .then((d) => setThreatIntel(d))
+                      .finally(() => setLoadingThreat(false))
+                  }}
+                />
+              )}
             </div>
           </div>
         </>
+      )}
+    </div>
+  )
+}
+
+// ──────────────────────────────────────────────────────────────
+// Compliance panel
+// ──────────────────────────────────────────────────────────────
+
+const FRAMEWORK_NAMES: Record<string, string> = {
+  soc2: 'SOC 2',
+  pci_dss: 'PCI DSS 4.0',
+  nist_800_53: 'NIST 800-53',
+  owasp_asvs: 'OWASP ASVS',
+}
+
+function CompliancePanel({ data, loading, scanId }: { data: any; loading: boolean; scanId: string }) {
+  const [activeFramework, setActiveFramework] = useState<string>('')
+
+  useEffect(() => {
+    if (data && !activeFramework) {
+      setActiveFramework(Object.keys(data)[0] ?? '')
+    }
+  }, [data])
+
+  if (loading) return <div className="text-center py-12 text-muted">Loading compliance data…</div>
+
+  if (!data) return (
+    <div className="text-center py-12 text-muted">
+      <div className="text-3xl mb-3">📋</div>
+      <p>Compliance data unavailable.</p>
+    </div>
+  )
+
+  const frameworks = Object.entries(data) as [string, any][]
+
+  return (
+    <div className="space-y-5">
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {frameworks.map(([key, fw]) => {
+          const pct = fw.compliance_pct
+          const color = pct >= 80 ? '#52c41a' : pct >= 60 ? '#ffc53d' : '#ff4d4f'
+          return (
+            <button
+              key={key}
+              onClick={() => setActiveFramework(key)}
+              className={`text-center p-4 rounded-xl border transition-all ${
+                activeFramework === key ? 'border-white/40 bg-surface2' : 'border-border hover:border-white/20'
+              }`}
+            >
+              <div className="text-2xl font-black" style={{ color }}>{pct}%</div>
+              <div className="text-xs font-semibold mt-1">{FRAMEWORK_NAMES[key] ?? key}</div>
+              <div className="text-[10px] text-muted">{fw.compliant}/{fw.total_controls} controls</div>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Full report link */}
+      <div className="flex justify-end">
+        <a
+          href={`/api/scan/${scanId}/compliance/report`}
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs px-3 py-1.5 bg-surface2 border border-border rounded-lg hover:border-white/30 transition-colors"
+        >
+          📄 Full Compliance Report
+        </a>
+      </div>
+
+      {/* Control list for active framework */}
+      {activeFramework && data[activeFramework] && (
+        <div className="space-y-2">
+          <h3 className="font-bold text-sm">{data[activeFramework].framework_name}</h3>
+          {Object.entries(data[activeFramework].controls as Record<string, any>).map(([ctrlId, ctrl]) => (
+            <details key={ctrlId} className="bg-surface2 border border-border rounded-xl overflow-hidden" open={ctrl.violated}>
+              <summary className="flex items-center gap-3 px-4 py-3 cursor-pointer list-none">
+                <span style={{ color: ctrl.violated ? '#ff4d4f' : '#52c41a', fontWeight: 'bold' }}>
+                  {ctrl.violated ? '✖' : '✔'}
+                </span>
+                <span className="font-mono text-xs bg-[#21262d] px-2 py-0.5 rounded text-muted">{ctrlId}</span>
+                <span className="text-sm font-semibold flex-1">{ctrl.title}</span>
+                {ctrl.violated ? (
+                  <span className="text-xs text-[#ff4d4f] bg-[#ff4d4f]/10 border border-[#ff4d4f]/30 px-2 py-0.5 rounded-full">
+                    {ctrl.finding_count} violation(s)
+                  </span>
+                ) : (
+                  <span className="text-xs text-[#52c41a] bg-[#52c41a]/10 border border-[#52c41a]/30 px-2 py-0.5 rounded-full">
+                    Compliant
+                  </span>
+                )}
+              </summary>
+              {ctrl.violated && ctrl.findings.length > 0 && (
+                <div className="px-4 pb-3 space-y-1 border-t border-border pt-3">
+                  <p className="text-xs text-muted mb-2">{ctrl.description}</p>
+                  {ctrl.findings.map((f: any, i: number) => (
+                    <div key={i} className="flex items-center gap-3 text-xs py-1.5 border-b border-border last:border-0">
+                      <SeverityBadge severity={f.severity} />
+                      <span className="flex-1 font-medium">{f.title}</span>
+                      <span className="font-mono text-muted">{f.file}:{f.line ?? '?'}</span>
+                      <span className="text-muted">{f.cwe}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </details>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ──────────────────────────────────────────────────────────────
+// Threat Intel panel
+// ──────────────────────────────────────────────────────────────
+
+function ThreatIntelPanel({
+  scanId, findings, data, loading, onEnrich,
+}: {
+  scanId: string
+  findings: any[]
+  data: any
+  loading: boolean
+  onEnrich: () => void
+}) {
+  const enrichedFindings = findings.filter((f) => f.threat_intel)
+
+  if (loading) return <div className="text-center py-12 text-muted">Fetching threat intelligence data…</div>
+
+  if (!data && enrichedFindings.length === 0) {
+    return (
+      <div className="text-center py-12 space-y-4">
+        <div className="text-4xl">🌐</div>
+        <p className="text-muted text-sm">
+          Enrich findings with live CVE/NVD data, EPSS exploit probabilities, and CISA KEV status.
+        </p>
+        <button
+          onClick={onEnrich}
+          className="px-5 py-2.5 rounded-lg font-bold text-sm bg-[#58a6ff] text-[#0d1117] hover:bg-[#79c0ff] transition-colors"
+        >
+          Fetch Threat Intelligence
+        </button>
+        <p className="text-xs text-muted">Queries NVD, FIRST EPSS, and CISA KEV APIs — takes ~10s</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-5">
+      {data && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            { label: 'CVEs Found', value: data.total_cves_found, color: '#ffc53d' },
+            { label: 'Active Exploits', value: data.findings_with_active_exploits, color: '#ff4d4f' },
+            { label: 'CISA KEV', value: data.cisa_kev_cves?.length ?? 0, color: '#ff4d4f' },
+            { label: 'Max EPSS', value: `${(data.max_epss_score * 100).toFixed(1)}%`, color: '#ff7a45' },
+          ].map((s) => (
+            <div key={s.label} className="bg-surface2 border border-border rounded-xl p-4 text-center"
+              style={{ borderTopWidth: 3, borderTopColor: s.color }}>
+              <div className="text-2xl font-black" style={{ color: s.color }}>{s.value}</div>
+              <div className="text-xs text-muted mt-1">{s.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {data?.cisa_kev_cves?.length > 0 && (
+        <div className="p-4 bg-[#ff4d4f]/10 border border-[#ff4d4f]/30 rounded-xl">
+          <div className="font-bold text-[#ff4d4f] text-sm mb-1">⚠ CISA Known Exploited Vulnerabilities</div>
+          <div className="flex flex-wrap gap-2 mt-2">
+            {data.cisa_kev_cves.map((cve: string) => (
+              <span key={cve} className="font-mono text-xs bg-[#ff4d4f]/20 text-[#ff4d4f] px-2 py-1 rounded">{cve}</span>
+            ))}
+          </div>
+          <p className="text-xs text-muted mt-2">These CVEs are actively exploited in the wild per CISA's KEV catalog.</p>
+        </div>
+      )}
+
+      {enrichedFindings.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="font-bold text-sm">Per-Finding CVE Details</h3>
+          {enrichedFindings.map((f, i) => {
+            const ti = f.threat_intel
+            return (
+              <details key={i} className="bg-surface2 border border-border rounded-xl overflow-hidden">
+                <summary className="flex items-center gap-3 px-4 py-3 cursor-pointer list-none">
+                  <SeverityBadge severity={f.severity} />
+                  <span className="flex-1 font-medium text-sm">{f.title}</span>
+                  {ti.actively_exploited && (
+                    <span className="text-xs text-[#ff4d4f] font-bold bg-[#ff4d4f]/10 border border-[#ff4d4f]/30 px-2 py-0.5 rounded-full">
+                      ACTIVELY EXPLOITED
+                    </span>
+                  )}
+                  <span className="text-xs text-muted">{ti.cve_count} CVE(s)</span>
+                  <span className="text-xs font-mono" style={{ color: ti.epss_max > 0.1 ? '#ff4d4f' : '#8b949e' }}>
+                    EPSS {(ti.epss_max * 100).toFixed(1)}%
+                  </span>
+                </summary>
+                <div className="border-t border-border p-4 space-y-2">
+                  {ti.cves.map((cve: any) => (
+                    <div key={cve.cve_id} className="flex items-start gap-3 text-xs py-2 border-b border-border last:border-0">
+                      <div className="shrink-0">
+                        <div className="font-mono font-bold text-[#58a6ff]">{cve.cve_id}</div>
+                        <div className="text-muted mt-0.5">{cve.published}</div>
+                      </div>
+                      <div className="flex-1 text-muted leading-relaxed">{cve.description}</div>
+                      <div className="shrink-0 text-right space-y-1">
+                        {cve.cvss_score != null && (
+                          <div className="font-bold" style={{ color: cve.cvss_score >= 9 ? '#ff4d4f' : cve.cvss_score >= 7 ? '#ff7a45' : '#ffc53d' }}>
+                            CVSS {cve.cvss_score}
+                          </div>
+                        )}
+                        {cve.in_kev && (
+                          <div className="text-[#ff4d4f] font-bold">KEV ⚠</div>
+                        )}
+                        <div className="text-muted">EPSS {(cve.epss * 100).toFixed(1)}%</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )
+          })}
+        </div>
       )}
     </div>
   )
