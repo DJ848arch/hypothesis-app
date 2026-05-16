@@ -22,6 +22,29 @@ search_nodes: recall context by keyword
 open_nodes: retrieve full details of stored nodes
 ```
 
+## MCP Servers
+
+| Server | Purpose | Notes |
+|---|---|---|
+| `memory` | Cross-session knowledge graph | Auto-allowed, no prompt |
+| `playwright` | Browser automation, screenshots, E2E tests | Runs headless |
+| `openapi` | Turns API spec into callable tools | Edit `.claude/openapi-config.yaml` to point at your spec |
+| `sentry` | Query errors, issues, releases | Set `SENTRY_ACCESS_TOKEN` env var |
+
+### Playwright usage
+Ask Claude to navigate, screenshot, or click through your running app:
+- "Screenshot the hypothesis submission form"
+- "Run through the login flow and confirm it works"
+- "Check if the results page renders correctly"
+
+### OpenAPI usage
+Update `.claude/openapi-config.yaml` with your API's OpenAPI spec URL.
+Claude will then have a typed tool for every endpoint — no manual wiring needed.
+
+### Sentry usage
+Set `SENTRY_ACCESS_TOKEN` in your environment. Claude can then query
+recent errors, get stack traces, and link bugs directly to code.
+
 ## Security
 
 A post-write security hook runs automatically after every file write/edit.

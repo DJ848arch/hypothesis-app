@@ -6,6 +6,27 @@
       "env": {
         "MEMORY_FILE_PATH": ".claude/memory/knowledge-graph.json"
       }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp", "--headless"],
+      "env": {}
+    },
+    "openapi": {
+      "command": "uvx",
+      "args": [
+        "mcp-this-openapi",
+        "--config-path", ".claude/openapi-config.yaml",
+        "--tool-naming", "auto"
+      ],
+      "env": {}
+    },
+    "sentry": {
+      "command": "npx",
+      "args": ["-y", "@sentry/mcp-server"],
+      "env": {
+        "SENTRY_ACCESS_TOKEN": "${SENTRY_ACCESS_TOKEN}"
+      }
     }
   },
   "hooks": {
@@ -28,7 +49,16 @@
       "mcp__memory__add_observations",
       "mcp__memory__search_nodes",
       "mcp__memory__open_nodes",
-      "mcp__memory__read_graph"
+      "mcp__memory__read_graph",
+      "mcp__playwright__browser_navigate",
+      "mcp__playwright__browser_screenshot",
+      "mcp__playwright__browser_click",
+      "mcp__playwright__browser_type",
+      "mcp__playwright__browser_wait_for",
+      "mcp__playwright__browser_close",
+      "mcp__sentry__list_issues",
+      "mcp__sentry__get_issue",
+      "mcp__sentry__list_projects"
     ]
   }
 }

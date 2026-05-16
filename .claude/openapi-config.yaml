@@ -1,0 +1,13 @@
+# mcp-this-openapi config — add your API spec URLs here.
+# Each entry becomes a set of MCP tools Claude can call directly.
+#
+# To use: replace the placeholder URL with your actual OpenAPI spec.
+# Supports JSON or YAML specs, local file paths or HTTP URLs.
+#
+# After updating, restart Claude Code to reload the MCP server.
+
+servers:
+  - name: hypothesis-api
+    openapi_spec_url: http://localhost:8000/openapi.json
+    # include_methods: [GET, POST, PUT, DELETE]
+    # exclude_methods: []
