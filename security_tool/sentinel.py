@@ -108,15 +108,18 @@ class SentinelAI:
         checkpoint_name: str,
         files: list[Path],
         target_dir: Path,
+        extra_context: str = "",
     ) -> dict:
         conf = SENTINEL_CHECKPOINTS[checkpoint_name]
         code_block = self._read_files(files, target_dir)
         file_list = ", ".join(str(f.relative_to(target_dir)) for f in files)
 
+        context_section = f"\n{extra_context}\n" if extra_context else ""
         user_message = (
             f"CHECKPOINT: {checkpoint_name.upper()}\n"
             f"Description: {conf['description']}\n"
-            f"Files to analyze ({len(files)} total): {file_list}\n\n"
+            f"Files to analyze ({len(files)} total): {file_list}\n"
+            f"{context_section}\n"
             f"{code_block}\n\n"
             "Analyze ALL files above for security vulnerabilities. Return the JSON result."
         )
@@ -156,7 +159,7 @@ class SentinelAI:
             "summary": f"Parse error — raw response: {response[:200]}",
         }
 
-    def scan(self, target_dir: Path) -> dict:
+    def scan(self, target_dir: Path, extra_context: str = "") -> dict:
         print(SENTINEL_BANNER)
         print(f"\n{CYAN}Locating checkpoint files in: {target_dir}{RESET_COLOR}\n")
 
@@ -168,7 +171,7 @@ class SentinelAI:
 
         results: dict[str, dict] = {}
         for checkpoint_name, files in checkpoint_map.items():
-            result = self.analyze_checkpoint(checkpoint_name, files, target_dir)
+            result = self.analyze_checkpoint(checkpoint_name, files, target_dir, extra_context)
             results[checkpoint_name] = result
 
         total_findings = sum(len(r.get("findings", [])) for r in results.values())

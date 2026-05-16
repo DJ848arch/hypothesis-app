@@ -6,6 +6,7 @@ import ScanProgress from './components/ScanProgress'
 import FindingsTable from './components/FindingsTable'
 import SeverityChart from './components/SeverityChart'
 import SeverityBadge from './components/SeverityBadge'
+import RemediationPanel from './components/RemediationPanel'
 
 // ──────────────────────────────────────────────────────────────
 // Layout
@@ -61,11 +62,23 @@ function ScanPage() {
   const { scanId } = useParams<{ scanId: string }>()
   const [results, setResults] = useState<ScanResults | null>(null)
   const [error, setError] = useState('')
+  const [activeTab, setActiveTab] = useState<'findings' | 'remediations' | 'integrations'>('findings')
+  const [remediations, setRemediations] = useState<any[]>([])
+
+  const fetchRemediations = useCallback(async () => {
+    if (!scanId) return
+    const res = await fetch(`/api/scan/${scanId}/remediations`)
+    if (res.ok) setRemediations(await res.json())
+  }, [scanId])
 
   const fetchResults = useCallback(async () => {
     if (!scanId) return
     const res = await fetch(`/api/scan/${scanId}/results`)
-    if (res.ok) setResults(await res.json())
+    if (res.ok) {
+      const data = await res.json()
+      setResults(data)
+      if (data.remediations?.length) setRemediations(data.remediations)
+    }
   }, [scanId])
 
   const highest = results?.highest_severity ?? 'CLEAR'
@@ -162,10 +175,45 @@ function ScanPage() {
             </div>
           </div>
 
-          {/* Findings */}
-          <div className="bg-surface border border-border rounded-2xl p-5">
-            <h3 className="font-bold mb-4">All Findings ({results.total_findings})</h3>
-            <FindingsTable findings={results.all_findings} />
+          {/* Tabs */}
+          <div className="bg-surface border border-border rounded-2xl overflow-hidden">
+            <div className="flex border-b border-border">
+              {[
+                { id: 'findings', label: `Findings (${results.total_findings})` },
+                { id: 'remediations', label: `AI Fix Proposals (${remediations.length})` },
+                { id: 'integrations', label: `Integrations (${results.integrations?.total ?? 0})` },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as typeof activeTab)}
+                  className={`px-5 py-3 text-sm font-semibold border-b-2 transition-colors ${
+                    activeTab === tab.id
+                      ? 'border-white text-white'
+                      : 'border-transparent text-muted hover:text-white'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <div className="p-5">
+              {activeTab === 'findings' && <FindingsTable findings={results.all_findings} />}
+              {activeTab === 'remediations' && (
+                <RemediationPanel
+                  scanId={scanId!}
+                  remediations={remediations}
+                  onUpdate={fetchRemediations}
+                />
+              )}
+              {activeTab === 'integrations' && (
+                <div className="space-y-3">
+                  <div className="text-sm text-muted mb-3">
+                    Tools run: {results.integrations?.tools_run?.join(', ') || 'none detected'}
+                  </div>
+                  <FindingsTable findings={results.integrations?.findings ?? []} />
+                </div>
+              )}
+            </div>
           </div>
         </>
       )}

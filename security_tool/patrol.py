@@ -104,7 +104,7 @@ class PatrolAI:
 
         return batches
 
-    def _analyze_batch(self, batch: list[tuple[Path, str]], batch_id: int, target_dir: Path) -> dict:
+    def _analyze_batch(self, batch: list[tuple[Path, str]], batch_id: int, target_dir: Path, extra_context: str = "") -> dict:
         parts: list[str] = []
         file_names: list[str] = []
         for filepath, content in batch:
@@ -114,10 +114,12 @@ class PatrolAI:
 
         code_block = "\n".join(parts)
         file_list = ", ".join(file_names)
+        context_section = f"\n{extra_context}\n" if extra_context else ""
 
         user_message = (
             f"PATROL BATCH {batch_id}\n"
-            f"Files ({len(batch)} total): {file_list}\n\n"
+            f"Files ({len(batch)} total): {file_list}\n"
+            f"{context_section}\n"
             f"{code_block}\n\n"
             "Analyze ALL files above for security vulnerabilities. Return the JSON result."
         )
@@ -157,7 +159,7 @@ class PatrolAI:
             "summary": f"Parse error — raw response: {response[:200]}",
         }
 
-    def scan(self, target_dir: Path) -> dict:
+    def scan(self, target_dir: Path, extra_context: str = "") -> dict:
         print(PATROL_BANNER)
         print(f"\n{GREEN}Collecting all code files in: {target_dir}{RESET_COLOR}\n")
 
@@ -173,7 +175,7 @@ class PatrolAI:
 
         batch_results: list[dict] = []
         for i, batch in enumerate(batches, start=1):
-            result = self._analyze_batch(batch, i, target_dir)
+            result = self._analyze_batch(batch, i, target_dir, extra_context)
             batch_results.append(result)
 
         total_findings = sum(len(r.get("findings", [])) for r in batch_results)

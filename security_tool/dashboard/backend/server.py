@@ -48,6 +48,7 @@ class ScanRequest(BaseModel):
     mode: str = "both"
     fail_on: str = "NONE"
     notify_on: str = "MEDIUM"
+    remediate: bool = False
     api_key: str | None = None
 
 
@@ -124,7 +125,21 @@ def _run_scan(scan_id: str, request: ScanRequest) -> None:
             notify_on=request.notify_on,
             interactive=False,
             scan_id=scan_id,
+            remediate=False,  # dashboard uses its own approval flow via API
         )
+
+        # If remediate mode requested, generate proposals (no auto-apply)
+        if request.remediate:
+            from responder import ResponderAI
+            import anthropic as _anthropic
+            client = _anthropic.Anthropic(api_key=api_key)
+            responder = ResponderAI(client)
+            proposals = []
+            for finding in results.get("all_findings", [])[:10]:  # cap at 10
+                proposal = responder.propose_fix(finding, target)
+                proposals.append({**proposal, "remediation_id": str(uuid.uuid4()), "approval_status": "pending"})
+            results["remediations"] = proposals
+            _scans[scan_id]["remediations"] = proposals
 
         from reporter import generate_html_report
         html_report = generate_html_report(results)
@@ -217,6 +232,50 @@ async def list_scans():
             "error": scan.get("error"),
         })
     return sorted(summaries, key=lambda s: s["timestamp"], reverse=True)
+
+
+@app.get("/api/scan/{scan_id}/remediations")
+async def get_remediations(scan_id: str):
+    scan = _scans.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+    return scan.get("remediations", [])
+
+
+@app.post("/api/scan/{scan_id}/remediation/{remediation_id}/approve")
+async def approve_remediation(scan_id: str, remediation_id: str):
+    scan = _scans.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+
+    remediations = scan.get("remediations", [])
+    proposal = next((r for r in remediations if r.get("remediation_id") == remediation_id), None)
+    if not proposal:
+        raise HTTPException(404, "Remediation not found")
+    if proposal.get("approval_status") != "pending":
+        raise HTTPException(400, "Remediation already actioned")
+
+    target = Path(scan["target"])
+    from remediation import apply_fix
+    result = apply_fix(proposal, target)
+    proposal["approval_status"] = "approved"
+    proposal["result"] = result
+    return result
+
+
+@app.post("/api/scan/{scan_id}/remediation/{remediation_id}/reject")
+async def reject_remediation(scan_id: str, remediation_id: str):
+    scan = _scans.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+
+    remediations = scan.get("remediations", [])
+    proposal = next((r for r in remediations if r.get("remediation_id") == remediation_id), None)
+    if not proposal:
+        raise HTTPException(404, "Remediation not found")
+
+    proposal["approval_status"] = "rejected"
+    return {"status": "rejected", "remediation_id": remediation_id}
 
 
 @app.delete("/api/scan/{scan_id}")

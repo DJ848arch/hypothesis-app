@@ -140,6 +140,14 @@ examples:
         help="Enable GitHub Actions mode: emit annotations, step summary, output vars",
     )
     parser.add_argument(
+        "--remediate", action="store_true",
+        help="Enable Responder AI: propose fixes for findings and apply approved ones (always human-gated)",
+    )
+    parser.add_argument(
+        "--notify-only", action="store_true",
+        help="Notify only — disable remediation even if --remediate is set (overrides --remediate)",
+    )
+    parser.add_argument(
         "--no-bass", action="store_true",
         help="Skip BASS authorization (for CI/automated use)",
     )
@@ -212,12 +220,17 @@ def main() -> None:
 
     from coordinator import SecurityCoordinator
 
+    remediate = args.remediate and not args.notify_only and interactive
+    if args.remediate and args.notify_only:
+        print(f"{YELLOW}[BASS] --notify-only overrides --remediate. Running in notify-only mode.{RESET_COLOR}\n")
+
     coordinator = SecurityCoordinator(api_key=api_key)
     results = coordinator.run(
         target_dir=target_dir,
         mode=args.mode,
         notify_on=args.notify_on,
         interactive=interactive,
+        remediate=remediate,
     )
 
     # GitHub Actions integration

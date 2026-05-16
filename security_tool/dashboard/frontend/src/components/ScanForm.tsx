@@ -9,6 +9,7 @@ export default function ScanForm({ onScanStarted }: Props) {
   const [mode, setMode] = useState('both')
   const [failOn, setFailOn] = useState('NONE')
   const [apiKey, setApiKey] = useState('')
+  const [remediate, setRemediate] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -20,7 +21,7 @@ export default function ScanForm({ onScanStarted }: Props) {
       const res = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target, mode, fail_on: failOn, api_key: apiKey || undefined }),
+        body: JSON.stringify({ target, mode, fail_on: failOn, remediate, api_key: apiKey || undefined }),
       })
       if (!res.ok) throw new Error(await res.text())
       const { scan_id } = await res.json()
@@ -86,6 +87,25 @@ export default function ScanForm({ onScanStarted }: Props) {
           placeholder="sk-ant-..."
           className="w-full px-3 py-2.5 bg-bg border border-border rounded-lg font-mono text-sm focus:outline-none focus:border-white/30 text-white placeholder-muted"
         />
+      </div>
+
+      {/* Remediation toggle */}
+      <div
+        className={`flex items-start gap-4 p-4 rounded-xl border cursor-pointer transition-all ${
+          remediate ? 'border-[#ffc53d]/50 bg-[#ffc53d]/8' : 'border-border bg-surface2'
+        }`}
+        onClick={() => setRemediate((v) => !v)}
+      >
+        <div className={`w-10 h-5 rounded-full relative transition-colors flex-shrink-0 mt-0.5 ${remediate ? 'bg-[#ffc53d]' : 'bg-border'}`}>
+          <div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${remediate ? 'left-5' : 'left-0.5'}`} />
+        </div>
+        <div>
+          <div className="text-sm font-semibold">🤖 AI Auto-Remediation</div>
+          <div className="text-xs text-muted mt-0.5">
+            Responder AI will propose fixes for confirmed findings.
+            <strong className="text-[#ffc53d]"> Human approval is always required before any code change.</strong>
+          </div>
+        </div>
       </div>
 
       {error && (
