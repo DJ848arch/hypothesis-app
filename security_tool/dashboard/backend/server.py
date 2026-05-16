@@ -287,6 +287,88 @@ async def delete_scan(scan_id: str):
     return {"deleted": scan_id}
 
 
+@app.post("/api/simulate")
+async def run_simulation(request: dict, background_tasks: BackgroundTasks):
+    scan_id = request.get("scan_id")
+    attack_type = request.get("attack_type", "auto")
+    api_key = request.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if not api_key:
+        raise HTTPException(400, "No Anthropic API key")
+
+    sim_id = str(uuid.uuid4())
+    _scans.setdefault("simulations", {})[sim_id] = {"status": "running", "results": []}
+
+    async def _run():
+        try:
+            import anthropic as _anthropic
+            from simulator import SimulatorAI
+            client = _anthropic.Anthropic(api_key=api_key)
+            sim_ai = SimulatorAI(client)
+
+            if scan_id and scan_id in _scans:
+                findings = _scans[scan_id].get("results", {}).get("all_findings", [])[:3]
+                results = [sim_ai.simulate_from_finding(f, Path(_scans[scan_id]["target"])) for f in findings]
+            else:
+                target = Path(request.get("target", "."))
+                results = [sim_ai.simulate_attack_type(attack_type, target)]
+
+            _scans.setdefault("simulations", {})[sim_id] = {
+                "status": "complete",
+                "results": [r for r in results if r and not r.get("error")],
+            }
+        except Exception as exc:
+            _scans.setdefault("simulations", {})[sim_id] = {"status": "error", "error": str(exc)}
+
+    background_tasks.add_task(_run)
+    return {"simulation_id": sim_id, "status": "running"}
+
+
+@app.get("/api/simulate/{sim_id}")
+async def get_simulation(sim_id: str):
+    sim = _scans.get("simulations", {}).get(sim_id)
+    if not sim:
+        raise HTTPException(404, "Simulation not found")
+    return sim
+
+
+@app.post("/api/simulation-feedback")
+async def submit_feedback(body: dict):
+    from feedback import record_feedback
+    return record_feedback(
+        simulation_id=body.get("simulation_id", ""),
+        realism=body.get("realism", 3),
+        clarity=body.get("clarity", 3),
+        accuracy=body.get("accuracy", 3),
+        comment=body.get("comment", ""),
+        attack_type=body.get("attack_type", ""),
+    )
+
+
+@app.post("/api/quiz-score")
+async def submit_quiz_score(body: dict):
+    from feedback import record_quiz_score
+    return record_quiz_score(
+        simulation_id=body.get("simulation_id", ""),
+        attack_type=body.get("attack_type", ""),
+        correct=body.get("correct", 0),
+        total=body.get("total", 0),
+        answers=body.get("answers", {}),
+    )
+
+
+@app.get("/api/feedback/stats")
+async def get_feedback_stats():
+    from feedback import get_stats
+    return get_stats()
+
+
+@app.get("/api/attack-catalog")
+async def get_attack_catalog():
+    from attack_catalog import list_attacks
+    return list_attacks()
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "scans": len(_scans)}

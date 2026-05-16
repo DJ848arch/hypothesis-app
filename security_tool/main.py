@@ -140,6 +140,20 @@ examples:
         help="Enable GitHub Actions mode: emit annotations, step summary, output vars",
     )
     parser.add_argument(
+        "--simulate", nargs="?", const="auto", metavar="ATTACK_TYPE",
+        help="Run attack simulations. Optionally specify attack type (sqli, xss, cmdi, ssrf, jwt_attack, etc.). "
+             "Without a type, simulates attacks matching found vulnerabilities. "
+             "Use --list-attacks to see all available types.",
+    )
+    parser.add_argument(
+        "--list-attacks", action="store_true",
+        help="List all available attack simulation types and exit.",
+    )
+    parser.add_argument(
+        "--training-report", default=None, metavar="FILE",
+        help="Save training report to FILE (default: bass-training.html) when --simulate is used.",
+    )
+    parser.add_argument(
         "--remediate", action="store_true",
         help="Enable Responder AI: propose fixes for findings and apply approved ones (always human-gated)",
     )
@@ -194,8 +208,25 @@ def _should_fail(results: dict, fail_on: str) -> bool:
 # Main
 # ──────────────────────────────────────────────────────────────
 
+def _handle_list_attacks() -> None:
+    from attack_catalog import list_attacks, DIFFICULTY_ORDER
+    print(f"\n{BOLD}{CYAN}BASS Attack Simulation Catalog{RESET_COLOR}\n")
+    for diff in DIFFICULTY_ORDER:
+        attacks = list_attacks(diff)
+        if not attacks:
+            continue
+        print(f"  {BOLD}{diff}{RESET_COLOR}")
+        for a in attacks:
+            print(f"    · {CYAN}{a['key']:<20}{RESET_COLOR}  {a['name']}  ({a['owasp']})")
+        print()
+
+
 def main() -> None:
     args = _parse_args()
+
+    if args.list_attacks:
+        _handle_list_attacks()
+        return
 
     github_action = args.github_action or os.environ.get("GITHUB_ACTIONS") == "true"
     interactive = not github_action and not args.no_bass
@@ -232,6 +263,37 @@ def main() -> None:
         interactive=interactive,
         remediate=remediate,
     )
+
+    # Attack simulations
+    if args.simulate:
+        from simulator import SimulatorAI
+        from training_report import generate_training_report
+        import anthropic as _anthropic
+
+        client = _anthropic.Anthropic(api_key=api_key)
+        sim_ai = SimulatorAI(client)
+        simulations: list[dict] = []
+
+        if args.simulate == "auto":
+            # Simulate from top findings
+            top_findings = results.get("all_findings", [])[:3]
+            if not top_findings:
+                print(f"{YELLOW}[SIMULATOR] No findings to simulate attacks from.{RESET_COLOR}")
+            for finding in top_findings:
+                sim = sim_ai.simulate_from_finding(finding, target_dir)
+                if sim and not sim.get("error"):
+                    simulations.append(sim)
+        else:
+            sim = sim_ai.simulate_attack_type(args.simulate, target_dir)
+            if sim and not sim.get("error"):
+                simulations.append(sim)
+
+        if simulations:
+            report_path = args.training_report or "bass-training.html"
+            html = generate_training_report(simulations, target=str(target_dir))
+            Path(report_path).write_text(html, encoding="utf-8")
+            print(f"\n{GREEN}Training report saved to: {report_path}{RESET_COLOR}")
+            print(f"{CYAN}Share with your security team for training and assessment.{RESET_COLOR}")
 
     # GitHub Actions integration
     if github_action:
