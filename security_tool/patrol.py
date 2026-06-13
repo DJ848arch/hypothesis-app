@@ -41,6 +41,15 @@ For each batch of files you receive, perform a thorough security analysis coveri
 - Business logic flaws with security implications
 - Secrets, credentials, or tokens hardcoded in source
 
+When IMPORT CONTEXT is provided for a file, use it to understand the full call chain.
+A vulnerability is more severe when user input can demonstrably reach the dangerous call.
+
+CONFIDENCE SCORING: For each finding, assess your confidence that this is a real (not false positive) vulnerability:
+- 90-100: Clear, direct vulnerability with no mitigating controls visible
+- 70-89: Likely real but some context is missing or partial mitigations exist
+- 50-69: Possible issue; depends on runtime context or caller behavior
+- Below 50: Do not report — too speculative
+
 Respond ONLY with a JSON object in this exact structure — no prose, no markdown, just raw JSON:
 {
   "batch_id": <integer>,
@@ -53,14 +62,15 @@ Respond ONLY with a JSON object in this exact structure — no prose, no markdow
       "cwe": "<CWE-XXX or null>",
       "title": "<short vulnerability title>",
       "description": "<detailed description>",
-      "recommendation": "<specific remediation advice>"
+      "recommendation": "<specific remediation advice>",
+      "confidence": <integer 50-100>
     }
   ],
   "summary": "<brief assessment of this batch>"
 }
 
 If no vulnerabilities are found in a batch, return an empty findings array.
-Be thorough — you are the last line of automated defense before human review."""
+Be thorough but precise — prefer false negatives over false positives."""
 
 MAX_CHARS_PER_BATCH = 80_000
 
@@ -104,24 +114,72 @@ class PatrolAI:
 
         return batches
 
+    def _resolve_import_context(self, filepath: Path, content: str, target_dir: Path) -> str:
+        """
+        Resolve local imports for a file and return a short summary of
+        what those imported modules expose (functions, classes, sinks).
+        Caps at 3000 chars total to avoid blowing the context window.
+        """
+        import_re = re.compile(
+            r'(?:from\s+([\w.]+)\s+import|import\s+([\w.]+)|require\(["\']([^"\']+)["\'])'
+        )
+        imported_summaries: list[str] = []
+        char_budget = 3000
+
+        for m in import_re.finditer(content):
+            module = (m.group(1) or m.group(2) or m.group(3) or "").replace(".", "/")
+            if not module:
+                continue
+            # Only local modules (no dots in top-level, or relative imports)
+            module_base = module.split("/")[-1]
+            for ext in [".py", ".js", ".ts", ".jsx", ".tsx"]:
+                for search_root in [filepath.parent, target_dir]:
+                    candidate = search_root / (module_base + ext)
+                    if candidate.exists() and candidate != filepath:
+                        try:
+                            imp_content = candidate.read_text(encoding="utf-8", errors="replace")
+                            rel = str(candidate.relative_to(target_dir))
+                            snippet = imp_content[:min(800, char_budget)]
+                            imported_summaries.append(f"-- IMPORTED: {rel} --\n{snippet}")
+                            char_budget -= len(snippet)
+                        except OSError:
+                            pass
+                        if char_budget <= 0:
+                            break
+                if char_budget <= 0:
+                    break
+
+        return "\n\n".join(imported_summaries) if imported_summaries else ""
+
     def _analyze_batch(self, batch: list[tuple[Path, str]], batch_id: int, target_dir: Path, extra_context: str = "") -> dict:
         parts: list[str] = []
         file_names: list[str] = []
+        import_contexts: list[str] = []
+
         for filepath, content in batch:
             relative = filepath.relative_to(target_dir)
             file_names.append(str(relative))
             parts.append(f"=== FILE: {relative} ===\n{content}\n")
 
+            # Include cross-file import context
+            imp_ctx = self._resolve_import_context(filepath, content, target_dir)
+            if imp_ctx:
+                import_contexts.append(f"=== IMPORT CONTEXT for {relative} ===\n{imp_ctx}\n")
+
         code_block = "\n".join(parts)
         file_list = ", ".join(file_names)
         context_section = f"\n{extra_context}\n" if extra_context else ""
+        import_section = "\n".join(import_contexts)
+        if import_section:
+            import_section = f"\nIMPORT CONTEXT (local modules imported by files above):\n{import_section}\n"
 
         user_message = (
             f"PATROL BATCH {batch_id}\n"
             f"Files ({len(batch)} total): {file_list}\n"
-            f"{context_section}\n"
+            f"{context_section}"
+            f"{import_section}\n"
             f"{code_block}\n\n"
-            "Analyze ALL files above for security vulnerabilities. Return the JSON result."
+            "Analyze ALL files above for security vulnerabilities. Use the import context to trace data flows across files. Return the JSON result."
         )
 
         print(f"  {GREEN}[PATROL]{RESET_COLOR} Scanning batch {BOLD}{batch_id}{RESET_COLOR} — {len(batch)} file(s): {file_list[:120]}{'...' if len(file_list) > 120 else ''}")

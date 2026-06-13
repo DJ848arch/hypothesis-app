@@ -132,8 +132,32 @@ function ScanPage() {
             <div>
               <span className="font-black text-xl" style={{ color: statusColor[highest] }}>{highest}</span>
               <span className="text-muted text-sm ml-3">{results.total_findings} finding(s) in {results.duration_seconds}s</span>
+              {results.cross_validation?.boosted > 0 && (
+                <span className="text-xs text-[#52c41a] ml-3">· {results.cross_validation.boosted} dual-confirmed</span>
+              )}
             </div>
-            <div className="ml-auto flex gap-3">
+            <div className="ml-auto flex gap-3 flex-wrap justify-end">
+              <button
+                onClick={() => {
+                  setActiveTab('threat')
+                  if (!threatIntel && !loadingThreat) {
+                    setLoadingThreat(true)
+                    fetch(`/api/scan/${scanId}/taint`, { method: 'POST' })
+                      .then((r) => r.json())
+                      .then((d) => {
+                        setThreatIntel({ taint: true })
+                        // Refresh results to pick up taint findings
+                        fetchResults()
+                      })
+                      .catch(() => setLoadingThreat(false))
+                      .finally(() => setLoadingThreat(false))
+                  }
+                }}
+                className="px-4 py-2 bg-surface2 border border-border rounded-lg text-sm hover:border-white/30 transition-colors"
+                title="Run data-flow taint analysis to find source→sink paths"
+              >
+                🔗 Taint Analysis
+              </button>
               <a
                 href={`/api/scan/${scanId}/report`}
                 target="_blank"

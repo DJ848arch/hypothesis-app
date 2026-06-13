@@ -48,6 +48,12 @@ For each file you analyze, examine it for:
 - Unsafe deserialization
 - Components with known vulnerabilities
 
+CONFIDENCE SCORING: For each finding, include your confidence that this is a real (non-false-positive) vulnerability:
+- 90-100: Definite vulnerability, no mitigating controls visible in the code
+- 70-89: Likely real, minor missing context or partial mitigations
+- 50-69: Possible issue; runtime behavior or caller context could make it safe
+- Below 50: Too speculative — do not report
+
 Respond ONLY with a JSON object in this exact structure — no prose, no markdown, just raw JSON:
 {
   "checkpoint": "<checkpoint name>",
@@ -60,14 +66,15 @@ Respond ONLY with a JSON object in this exact structure — no prose, no markdow
       "cwe": "<CWE-XXX or null>",
       "title": "<short vulnerability title>",
       "description": "<detailed description of the vulnerability>",
-      "recommendation": "<specific remediation advice>"
+      "recommendation": "<specific remediation advice>",
+      "confidence": <integer 50-100>
     }
   ],
   "summary": "<brief overall security assessment of this checkpoint>"
 }
 
 If no vulnerabilities are found, return an empty findings array with a summary saying the checkpoint appears secure.
-Be precise, thorough, and unambiguous. Your findings protect real systems."""
+Be precise and conservative — prefer false negatives over false positives. Findings with confidence below 50 must be omitted."""
 
 
 class SentinelAI:

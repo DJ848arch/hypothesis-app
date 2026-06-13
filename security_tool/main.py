@@ -174,6 +174,11 @@ examples:
         "--watch", action="store_true",
         help="Watch mode: continuously monitor the target for changes and rescan on every save",
     )
+    # ── Taint analysis ──────────────────────────────────────────
+    parser.add_argument(
+        "--taint", action="store_true",
+        help="Run cross-file taint analysis: trace user input from sources to dangerous sinks",
+    )
     # ── Threat intelligence ─────────────────────────────────────
     parser.add_argument(
         "--threat-intel", action="store_true",
@@ -320,6 +325,23 @@ def main() -> None:
         interactive=interactive,
         remediate=remediate,
     )
+
+    # ── Taint analysis ─────────────────────────────────────────
+    if getattr(args, "taint", False):
+        from taint_analyzer import run_taint_analysis
+        import anthropic as _anthropic_taint
+        print(f"\n{BOLD}{CYAN}[TAINT]{RESET_COLOR} Running cross-file data-flow taint analysis…")
+        taint_client = _anthropic_taint.Anthropic(api_key=api_key)
+        taint_findings = run_taint_analysis(target_dir, taint_client)
+        if taint_findings:
+            results["all_findings"] = taint_findings + results.get("all_findings", [])
+            results["total_findings"] = len(results["all_findings"])
+            results["taint_findings"] = taint_findings
+            results["severity_counts"] = {
+                sev: sum(1 for f in results["all_findings"] if f.get("severity", "").upper() == sev)
+                for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+            }
+        print()
 
     # ── Threat intelligence enrichment ─────────────────────────
     if getattr(args, "threat_intel", False):

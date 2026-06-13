@@ -607,6 +607,70 @@ async def enrich_with_threat_intel(scan_id: str):
     return results["threat_intel_summary"]
 
 
+@app.post("/api/finding/false-positive")
+async def report_false_positive(body: dict):
+    """Mark a finding as a false positive — suppresses it in future scans."""
+    from fp_feedback import record_false_positive
+    return record_false_positive(
+        file=body.get("file", ""),
+        line=body.get("line"),
+        cwe=body.get("cwe", ""),
+        title=body.get("title", ""),
+        reported_by=body.get("reported_by", "analyst"),
+        reason=body.get("reason", ""),
+    )
+
+
+@app.delete("/api/finding/false-positive")
+async def remove_false_positive(body: dict):
+    """Remove a false positive suppression."""
+    from fp_feedback import remove_suppression
+    removed = remove_suppression(
+        file=body.get("file", ""),
+        cwe=body.get("cwe", ""),
+        title=body.get("title", ""),
+    )
+    return {"removed": removed}
+
+
+@app.get("/api/false-positives")
+async def list_false_positives():
+    from fp_feedback import list_suppressions
+    return list_suppressions()
+
+
+@app.post("/api/scan/{scan_id}/taint")
+async def run_taint_analysis(scan_id: str):
+    """Run taint analysis on a completed scan's target directory."""
+    scan = _scans.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise HTTPException(400, "No API key configured")
+
+    target = scan.get("target", ".")
+    target_path = Path(target)
+
+    import anthropic as _ant
+    from taint_analyzer import run_taint_analysis as _run_taint
+
+    client = _ant.Anthropic(api_key=api_key)
+    findings = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _run_taint(target_path, client)
+    )
+
+    # Append taint findings to scan results
+    if scan.get("results"):
+        existing = scan["results"].get("all_findings", [])
+        scan["results"]["all_findings"] = existing + findings
+        scan["results"]["taint_findings"] = findings
+        scan["results"]["total_findings"] = len(scan["results"]["all_findings"])
+
+    return {"taint_findings": len(findings), "findings": findings}
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "scans": len(_scans)}

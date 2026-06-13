@@ -22,7 +22,8 @@ from sentinel import SentinelAI
 from patrol import PatrolAI
 from notifier import notify_human, print_summary_report
 from integrations.runner import IntegrationRunner
-from config import SEVERITY_LEVELS, RESET_COLOR, BOLD, CYAN, GREEN, YELLOW
+from fp_feedback import apply_fp_suppressions, build_fp_context_block
+from config import SEVERITY_LEVELS, RESET_COLOR, BOLD, CYAN, GREEN, YELLOW, MAGENTA
 
 ProgressCallback = Callable[[str, str, int, int], None]
 
@@ -81,6 +82,11 @@ class SecurityCoordinator:
         context_block = self._integrations.build_context_block(integration_results["findings"])
         self._emit("integrations", f"{integration_results['total']} findings from external tools", 1, 1)
 
+        # Include known FP patterns in AI context to reduce re-flagging
+        fp_context = build_fp_context_block()
+        if fp_context:
+            context_block = f"{context_block}\n\n{fp_context}" if context_block else fp_context
+
         # ── 2. Sentinel AI ────────────────────────────────────────
         sentinel_results: dict = {"checkpoints": {}, "total_findings": 0}
         if mode in ("sentinel", "both"):
@@ -99,12 +105,26 @@ class SecurityCoordinator:
             if interactive:
                 self._process_patrol_alerts(patrol_results, notify_priority)
 
+        # ── 4. Cross-validation (dual-AI) ─────────────────────────
+        cross_val_stats: dict = {}
+        if mode == "both":
+            cross_val_stats = self._cross_validate(sentinel_results, patrol_results)
+
         duration = time.monotonic() - start_time
         all_findings = self._flatten_findings(
             integration_results["findings"],
             sentinel_results,
             patrol_results,
         )
+
+        # Apply FP suppressions (removes exact matches, reduces confidence on fuzzy)
+        all_findings = apply_fp_suppressions(all_findings)
+
+        # Sort again after possible confidence mutations
+        all_findings = sorted(all_findings, key=lambda f: (
+            _priority(f.get("severity", "INFO")),
+            f.get("confidence", 70),
+        ), reverse=True)
 
         result = {
             "scan_id": scan_id,
@@ -115,6 +135,7 @@ class SecurityCoordinator:
             "integrations": integration_results,
             "sentinel": sentinel_results,
             "patrol": patrol_results,
+            "cross_validation": cross_val_stats,
             "all_findings": all_findings,
             "severity_counts": _severity_counts(all_findings),
             "highest_severity": _highest_severity(all_findings),
@@ -176,6 +197,116 @@ class SecurityCoordinator:
             remediation_log.append({**proposal, "approval": "approved", "result": apply_result})
 
         return remediation_log
+
+    def _cross_validate(
+        self,
+        sentinel_results: dict,
+        patrol_results: dict,
+    ) -> dict:
+        """
+        Compare Sentinel and Patrol findings. When both AIs flag the same
+        file+CWE, boost confidence. When only one flags it, run a lightweight
+        verification pass with the other AI's perspective.
+
+        Returns stats dict: {boosted, verified_by_second_ai, low_confidence_dropped}
+        """
+        s_findings = [
+            f for cp in sentinel_results.get("checkpoints", {}).values()
+            for f in cp.get("findings", [])
+        ]
+        p_findings = [
+            f for b in patrol_results.get("batches", [])
+            for f in b.get("findings", [])
+        ]
+
+        stats = {"boosted": 0, "verified_unique": 0, "low_confidence_dropped": 0}
+
+        def _match_key(f: dict) -> tuple:
+            return (f.get("file", ""), f.get("cwe") or f.get("title", ""))
+
+        s_keys = {_match_key(f): f for f in s_findings}
+        p_keys = {_match_key(f): f for f in p_findings}
+
+        # Boost confidence when both AIs agree
+        for key, sf in s_keys.items():
+            if key in p_keys:
+                pf = p_keys[key]
+                # Both found it — boost confidence by 15 on both
+                for finding in [sf, pf]:
+                    old_conf = finding.get("confidence", 70)
+                    finding["confidence"] = min(100, old_conf + 15)
+                    finding["_cross_validated"] = True
+                stats["boosted"] += 1
+
+        # For unique findings below confidence threshold, run a quick second-opinion
+        # AI verification call (only for HIGH+ severity to manage cost)
+        unique_sentinel = [f for k, f in s_keys.items() if k not in p_keys]
+        unique_patrol = [f for k, f in p_keys.items() if k not in s_keys]
+
+        for f in unique_sentinel + unique_patrol:
+            if f.get("severity", "INFO") in ("CRITICAL", "HIGH") and f.get("confidence", 70) < 75:
+                verified = self._verify_unique_finding(f)
+                if verified is not None:
+                    f["confidence"] = verified
+                    f["_second_opinion"] = True
+                    stats["verified_unique"] += 1
+
+        # Tag low-confidence findings for UI visibility (don't remove — let UI filter)
+        for f in s_findings + p_findings:
+            if f.get("confidence", 70) < 55:
+                f["_low_confidence"] = True
+                stats["low_confidence_dropped"] += 1
+
+        if stats["boosted"]:
+            print(f"  {CYAN}[CROSS-VAL]{RESET_COLOR} {stats['boosted']} finding(s) confirmed by both AIs — confidence boosted")
+        if stats["verified_unique"]:
+            print(f"  {CYAN}[CROSS-VAL]{RESET_COLOR} {stats['verified_unique']} unique finding(s) verified by second-opinion pass")
+
+        return stats
+
+    def _verify_unique_finding(self, finding: dict) -> int | None:
+        """
+        Run a quick second-opinion on a finding flagged by only one AI.
+        Returns updated confidence (int) or None if verification failed.
+        """
+        try:
+            file_path = finding.get("file", "")
+            # Read the file for context (cap at 3000 chars)
+            code_snippet = ""
+            try:
+                code_snippet = Path(file_path).read_text(encoding="utf-8", errors="replace")[:3000]
+            except OSError:
+                pass
+
+            msg = self._client.messages.create(
+                model="claude-opus-4-7",
+                max_tokens=256,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Security verification request. One AI flagged this finding:\n\n"
+                        f"Title: {finding.get('title')}\n"
+                        f"Severity: {finding.get('severity')}\n"
+                        f"CWE: {finding.get('cwe')}\n"
+                        f"Description: {finding.get('description')}\n"
+                        f"File: {file_path}\n\n"
+                        f"Code:\n```\n{code_snippet}\n```\n\n"
+                        "Is this a real vulnerability? Reply ONLY with a JSON object: "
+                        '{"real": true|false, "confidence": 50-100, "reason": "<one sentence>"}'
+                    ),
+                }],
+            )
+            text = next((b.text for b in msg.content if hasattr(b, "text")), "")
+            import json as _json, re as _re
+            m = _re.search(r"\{.*\}", text, _re.DOTALL)
+            if m:
+                data = _json.loads(m.group())
+                if not data.get("real", True):
+                    return max(0, data.get("confidence", 40) - 20)
+                return data.get("confidence", 70)
+        except Exception:
+            pass
+        return None
 
     def _flatten_findings(
         self,
