@@ -1,0 +1,46 @@
+name: 'BASS AI Security Scanner'
+description: 'AI-powered security scanning — Sentinel guards vulnerability hotspots, Patrol sweeps the full codebase'
+author: 'DJ848arch'
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  anthropic-api-key:
+    description: 'Anthropic API key (store as a repository secret)'
+    required: true
+  target:
+    description: 'Directory to scan, relative to the repository root'
+    required: false
+    default: '.'
+  mode:
+    description: 'Scan mode — sentinel (checkpoints only), patrol (full codebase), both'
+    required: false
+    default: 'both'
+  fail-on:
+    description: 'Fail the workflow if any finding meets or exceeds this severity. Set to NONE to never fail.'
+    required: false
+    default: 'HIGH'
+  notify-on:
+    description: 'Minimum severity for human-notification output (default: MEDIUM)'
+    required: false
+    default: 'MEDIUM'
+
+outputs:
+  findings-count:
+    description: 'Total number of security findings'
+  highest-severity:
+    description: 'The highest severity level found (CRITICAL, HIGH, MEDIUM, LOW, INFO, or CLEAR)'
+  report-path:
+    description: 'Path to the generated HTML report artifact'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+    BASS_TARGET: ${{ inputs.target }}
+    BASS_MODE: ${{ inputs.mode }}
+    BASS_FAIL_ON: ${{ inputs.fail-on }}
+    BASS_NOTIFY_ON: ${{ inputs.notify-on }}
